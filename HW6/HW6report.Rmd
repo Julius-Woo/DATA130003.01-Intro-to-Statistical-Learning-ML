@@ -1,0 +1,254 @@
+---
+title: "Statistical Learning HW6"
+author: "吴嘉骜 21307130203"
+date: "2023-11-18"
+output:
+  html_document:
+    self_contained: yes
+    toc: yes
+    toc_depth: 2
+    toc_float:
+      collapsed: no
+      smooth_scroll: no
+      number_sections: yes
+  pdf_document:
+    toc: yes
+    toc_depth: '2'
+---
+
+```{=html}
+<style type="text/css">
+h1.title{
+  font-size: 38px;
+  color: DarkRed;
+  text-align: center;
+}
+h4.author{
+  font-size: 18px;
+  color: DarkRed;
+  text-align: center;
+}
+h4.date {
+  font-size: 18px;
+  font-family: "Times New Roman", Times, serif;
+  color: DarkBlue;
+  text-align: center;
+}
+
+</style>
+```
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, cache = TRUE, message = TRUE, fig.align = "center")
+library(dplyr)
+library(ggplot2)
+library(pROC)
+library(ROSE)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(adabag)
+```
+
+
+准备工作
+
+```{r}
+# 清除工作环境
+cat("\014");rm(list = ls())
+# 设置工作目录
+setwd("E:/code/DATA130003.01 Intro to Statistical Learning&ML/HW6")
+```
+
+# 一、数据读取与预处理
+
+```{r}
+# 读入数据
+data <- read.csv('lc_data.csv', header = T, fileEncoding = "utf-8")
+data$EASY <- ifelse(data$difficulty == "EASY", 1, 0)
+data$difficulty <- factor(data$difficulty, levels = c("EASY", "MEDIUM", "HARD"))  # 重新设置因子级别顺序
+data <- na.omit(data)  # 删除缺失值
+
+# 设置基准组
+data$EASY <- relevel(factor(data$EASY), ref = "0")
+data$quesClass <- relevel(factor(data$quesClass), ref = "题库")
+data$example <- relevel(factor(data$example), ref = "1")
+```
+
+
+# 二、描述性分析
+
+## 1. 题目难度占比分布直方图
+```{r}
+ggplot(data, aes(x = difficulty, fill = difficulty)) +
+  geom_bar(aes(y = (..count..)/sum(..count..)), width = 0.5) +
+  ylim(0, 0.7)+
+  geom_text(aes(label = scales::percent((..count..)/sum(..count..)),
+                y = (..count..)/sum(..count..)), 
+            stat = "count", vjust = -0.5) +
+  labs(title = "LeetCode题目难度占比直方图", x = "难度", y = "占比") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Pastel1")
+```
+
+由直方图可见，LeetCode的题目中，中等题占比最大，超过了一半，其次是简单题，最后是困难题，后两者占比相差不大。
+
+## 2. 题目难度的要求文本长度箱线图
+```{r}
+ggplot(data, aes(x = difficulty, y = requireLen, fill = difficulty)) +
+  geom_boxplot() +
+  labs(title = "不同难度题目的要求文本长度箱线图", x = "难度", y = "要求文本长度") +
+  theme_minimal()+
+  scale_fill_brewer(palette = "Pastel1")
+```
+
+由箱线图可见，困难题的要求文本长度的中位数最大，其次是中等题，最后是简单题，后两者中位数相差不大。困难题的要求文本长度的分布范围也是最大的，且异常值最多，说明困难题的要求文本长度波动很大。简单题的波动则比较小。这符合题干复杂，题目理解就困难的一般规律。
+
+## 3. 题目难度示例数量占比柱状图
+
+```{r}
+ggplot(data, aes(x = difficulty, fill = as.factor(example))) +
+  geom_bar(position = "fill", width=0.4) +
+  labs(title = "不同难度的题目示例的数量占比柱状图", x = "难度", y = "占比") +
+  scale_fill_discrete(name = "示例数量")+
+  theme_minimal()
+```
+
+由柱状图可见，不论题目难度如何，总是数量为2的示例最多，其次是数量为3的示例，最后是数量为1的示例。示例个数为4个以上的题目都比较稀少。对于简单题，示例数为1的比例相较于另两种难度的题目更高，而困难题有3个以上示例的题目比例也比另两种题目高，相对来说示例数量为1和2的题目占比低。
+
+## 4. 不同公司题目数量柱状图
+```{r}
+# 计算每个公司的题目总数
+company_totals <- colSums(data[, c("huawei", "bytedance", "microsoft", "google", "amazon", "tencent", "otherCom")])
+
+# 将结果转换为数据框
+company_totals_df <- data.frame(company = names(company_totals), total = company_totals)
+
+# 绘制柱状图
+ggplot(company_totals_df, aes(x = company, y = total, fill = company)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = total, y = total), vjust = -0.5) +
+  ylim(0,2000)+
+  theme_minimal() +
+  labs(title = "不同公司LeetCode题目数量", x = "公司", y = "题目数量") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_brewer(palette = "Pastel1")
+```
+
+由柱状图可见，标签为其他公司的题目最多，其次是亚马逊、谷歌和字节跳动的，微软的题目量适中，华为和腾讯的题目量最少。
+
+## 5. 分类标签数量的简单题比例直方图
+```{r, fig.width=8}
+# 定义分类标签列
+category_cols <- c("Fundamentals", "Algorithms", "Common.Data.Structures", "Advanced.Data.Structures", "Techniques", "Math", "Other")
+
+# 计算每个分类下简单题的比例
+catedf <- data.frame(category = character(), proportion = numeric()) # 初始化数据框
+for(cat in category_cols){
+  total <- sum(data[[cat]])
+  easy_count <- sum(data[data$EASY == 1, cat])
+  proportion <- easy_count / total
+  catedf <- rbind(catedf, data.frame(category = cat, proportion = proportion))
+}
+
+# 绘制直方图
+ggplot(catedf, aes(x = category, y = proportion, fill = category)) +
+  geom_bar(stat = "identity", width=0.5) +
+  ylim(0, 0.5)+
+  theme_minimal() +
+  geom_text(aes(label = scales::percent(proportion), y = proportion), vjust = -0.5, size=3) +
+  labs(title = "不同分类标签数量下简单题所占比例直方图", x = "分类标签数量", y = "比例") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+  scale_fill_brewer(palette = "Pastel1")
+```
+
+由直方图可见，简单题占比最少的是高级数据结构类，可能这部分题目的难度较大所致。简单题占比最多的是其他类，其次是基础类、数学类和技巧类，它们的数值相差不大。算法类的简单题占比处于中间值。
+
+# 三、建模数据预处理
+
+```{r}
+# 设置随机种子
+set.seed(2023)
+data1 <- subset(data, select = -c(difficulty, require, tips))  # 为后续分类方便，删除难度、要求和提示列
+# 重采样
+balanced_data <- ovun.sample(EASY~., data = data1, method = "under", N = 2*726)$data
+# 划分训练集和测试集
+test_indices <- sample(1:nrow(balanced_data), size =  nrow(balanced_data)*0.3, replace = F)
+train_data <- balanced_data[-test_indices, ]
+test_data <- balanced_data[test_indices, ]
+```
+
+# 四、建模
+
+## 1. 建立CART决策树模型
+
+```{r}
+# 建立CART决策树模型
+cart_model <- rpart(EASY~., data = train_data, method = "class", control = rpart.control(maxdepth = 3))
+# impv <- summary(cart_model)$variable.importance
+# print(impv)
+
+# 可视化决策树
+rpart.plot(cart_model, cex = 0.6)
+```
+
+通过变量重要性列表，我们发现Algorithms是最重要的变量，其次是topicNum，Common.Data.Structures、sortedNum和requireLen居后。
+
+上面的决策树表明，蓝色节点预测为类别0（非简单题），绿色节点预测为类别1（简单题）。节点下的判断成立时，向左走，否则向右走。节点内的数值由上到下分别为预测类别、预测为1的概率、样本数量占总体的比例。
+
+决策树首先根据题目是否有算法类标签分类，有标签则归到非简单题，没有则归到简单题。然后，对于左子节点，如果所属题库的编号小于496且非基础题，进一步划分出简单题；对于右子节点，考虑分类标签总数量，小于3的归到简单题，再按照要求文本长度进行分类，长度小于168的归到简单题，等等。叶节点给出了具体的预测结果，蓝色节点居中的数值实际是预期损失，越小越好；绿色节点居中的数值则越大越好。由结果可以看到最左和最右边的分类效果比较好。
+
+## 2. 建立随机森林模型
+
+```{r}
+library(randomForest)
+library(randomForestExplainer)
+# 建立随机森林模型
+rf_model <- randomForest(EASY~., data = train_data, ntree = 200, proximity=TRUE, importance=TRUE)
+
+# 绘制特征重要性图
+varImpPlot(rf_model, cex = 0.5, main = "随机森林特征重要性图")
+```
+
+MeanDecreaseGini和MeanDecreaseAccuracy分别表示基尼系数和准确率的平均减少量，都是衡量特征重要性的指标，值越大越重要。由图可见，Algorithms、requireLen、topicNum对于提升模型准确率的贡献最大，requireLen、tipsLen、sortedNum和Algorithms对于降低节点的基尼指数贡献最大。
+
+## 3. 建立AdaBoost模型
+
+```{r}
+# 建立AdaBoost模型
+ada_model <- boosting(EASY~., data = train_data, mfinal= 100)
+
+# 绘制特征重要性图
+imp <- sort(ada_model$importance, decreasing = T)
+# head(imp)
+barplot(imp, cex.names = 0.5, main = "AdaBoost特征重要性图", xlab = "特征", ylab = "重要性", las = 2)
+```
+
+由图可见，Adaboost模型认为sortedNum、requireLen、tipsLen这几个特征对于预测最重要。
+
+## 4. 综合比较三种模型的预测效果
+
+```{r, message=FALSE}
+# 对测试集进行预测
+cart_pred <- predict(cart_model, test_data, type = "prob")[, 2]
+# 只看正类（简单题）的预测概率
+rf_pred <- predict(rf_model, test_data, type = "prob")[, 2]
+ada_pred <- predict(ada_model, test_data, type = "prob")$prob[, 2]
+# 计算ROC曲线
+roc_cart <- roc(test_data$EASY, cart_pred)
+roc_rf <- roc(test_data$EASY, rf_pred)
+roc_ada <- roc(test_data$EASY, ada_pred)
+# 绘制ROC曲线
+ggroc(list(cart = roc_cart, rf = roc_rf, ada = roc_ada)) +
+  ggtitle("ROC曲线对比") +
+  xlab("FPR（假正率）") +
+  ylab("TPR (敏感度)") +
+  scale_color_discrete(name = "Model Name")+
+  geom_abline(slope = 1, intercept = 1, linetype = "dashed", color = "grey")
+
+# 输出每个模型的AUC值
+auc(roc_cart)
+auc(roc_rf)
+auc(roc_ada)
+```
+
+由ROC曲线及AUC值，我们可以看出，三种模型的预测效果都远超过随机分类，随机森林模型的预测效果最好，其次是AdaBoost模型，最后是CART决策树模型。随机森林模型和AdaBoost模型在假正率较低时更陡峭，说明整体性能更好，可以在不牺牲特异性的情况下实现更高的敏感性。
